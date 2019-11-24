@@ -1,0 +1,30 @@
+    return 1;
+}
+// Global func start
+
+// sin
+float fun_sin(float x)
+{
+    return sin(x);
+}
+
+/**
+ * @description: 绘制圆
+ * @param: uv : 
+ * @param: p : 圆心位置
+ * @param: r : 圆半径
+ * @return: img/2019-11-24-23-23-59.png
+ */
+float fun_DrawCircle(float2 uv, float2 p, float r = 0.01)
+{
+    if (distance(uv, p) <= r)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+// Global func end
+float Func_Null()
+{
+    return 1;

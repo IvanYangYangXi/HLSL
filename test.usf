@@ -1,0 +1,13 @@
+    return 1;
+}
+// Global func start
+
+float Fx(float x)
+{
+    return sin(x);
+}
+
+// Global func end
+float Func_Null()
+{
+    return 1;
