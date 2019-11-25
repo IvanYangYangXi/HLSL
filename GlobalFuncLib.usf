@@ -26,12 +26,10 @@ float fun_DrawCircle(float2 uv, float2 p, float r = 0.01)
 }
 
 /**
- * @description: 绘制圆
+ * @description: 一阶贝塞尔曲线
  * @param: uv : 
- * @param: p : 圆心位置
- * @param: r : 圆半径
  * @return: 
- * img/2019-11-24-23-23-59.png
+ * img/2019-11-25-19-47-33.png img/2019-11-25-19-48-10.png
  */
 float fun_DrawLine(float2 uv)
 {
