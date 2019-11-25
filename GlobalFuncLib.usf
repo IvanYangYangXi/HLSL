@@ -9,11 +9,12 @@ float fun_sin(float x)
 }
 
 /**
- * @description: 绘制圆
+ * @description: 绘制圆（点）
  * @param: uv : 
  * @param: p : 圆心位置
  * @param: r : 圆半径
- * @return: img/2019-11-24-23-23-59.png
+ * @return: 
+ * img/2019-11-24-23-23-59.png
  */
 float fun_DrawCircle(float2 uv, float2 p, float r = 0.01)
 {
@@ -23,6 +24,37 @@ float fun_DrawCircle(float2 uv, float2 p, float r = 0.01)
     }
     return 0;
 }
+
+/**
+ * @description: 绘制圆
+ * @param: uv : 
+ * @param: p : 圆心位置
+ * @param: r : 圆半径
+ * @return: 
+ * img/2019-11-24-23-23-59.png
+ */
+float fun_DrawLine(float2 uv)
+{
+    float sec = 0.001;
+    float2 pStart = {0,0};
+    float2 pEnd = {1,1};
+
+    float t = 0;
+    float color = 0;
+
+    for (int i = 0; i < 4096; i++)
+    {
+        // 一阶贝塞尔曲线
+        float2 p = pStart + (t * pEnd - t * pStart);
+
+        color += fun_DrawCircle(uv, p);
+        t += sec;
+        if (distance(p, pEnd) <= 0.01)
+            break;
+    }
+    return color;
+}
+
 
 // Global func end
 float Func_Null()
