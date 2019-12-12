@@ -1,0 +1,486 @@
+    return 1;
+}
+
+#define MARCHING_STEPS 128
+#define MARCHING_SIZE 0.001
+
+
+float hash(float3 p)
+{
+    p = frac(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return frac(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float Noise(in float3 x)
+{
+    float3 p = floor(x);
+    float3 f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+
+    return lerp(lerp(lerp( hash(p + float3(0,0,0)), 
+                        hash(p + float3(1,0,0)),f.x),
+                   lerp( hash(p + float3(0,1,0)), 
+                        hash(p + float3(1,1,0)),f.x),f.y),
+               lerp(lerp( hash(p + float3(0,0,1)), 
+                        hash(p + float3(1,0,1)),f.x),
+                   lerp( hash(p + float3(0,1,1)), 
+                        hash(p + float3(1,1,1)),f.x),f.y),f.z);
+}
+
+float map5(in float3 p)
+{
+    float3 q = p;
+    float f = 0.0f;
+    f  = 0.50000 * Noise( q );
+    q = q * 2.02;
+    f += 0.25000 * Noise( q );
+    q = q * 2.03;
+    f += 0.12500 * Noise( q );
+    q = q * 2.01;
+    f += 0.06250 * Noise( q );
+    q = q * 2.02;
+    f += 0.03125 * Noise( q );
+	return clamp(f, 0.0, 1.0);
+}
+
+float map3( in float3 p )
+{
+    float3 q = p;
+    float f = 0.0f;
+    f  = 0.50000 * Noise( q );
+    q = q * 2.02;
+    f += 0.25000 * Noise( q );
+    q = q * 2.03;
+    f += 0.12500 * Noise( q );
+	return clamp(f, 0.0, 1.0);
+}
+
+float remap(float V, float L0=0, float H0=0, float Ln=1, float Hn=1)
+{
+    return Ln + (Hn - Ln) * (V - L0) / (H0 - L0);
+}
+
+
+float3 ScaleWorldSpaceToTextureSpace(float3 WorldSapcePosition, float3 actorpos)
+{
+    // return ((WorldSapcePosition - actorpos) / (1000 * 250) * 1) + 0.5f;
+    return ((WorldSapcePosition - actorpos) / (Primitive.ObjectBounds.xyz * 2) * 1) + 0.5f;
+}
+
+
+// Henyey-Greenstein（后文简称H-G）蒙特卡罗辐射传输模拟函数,分布定义体散射,主要包括光线与生物样本或星际尘埃之间发生的散射效应
+/* 
+ 参数g用来对分布进行描述。当g=0时，该模型模拟光线射入材料后，散射光线在所有方向的散射概率是相同的。随着g逐渐增大并接近1，散射分布逐渐集中于q=0度的方向。
+ */
+float HG(float cos_angle, float g)
+{
+    float g2 = g * g;
+    float val = (1 - g2) / (pow((1 + g2 - 2 * g * cos_angle), 1.5) * (4 * 3.1415927));
+    return val;
+}
+
+// 透射衰减
+// 透射率 比尔-朗伯定律计算透射率
+//https://patapom.com/topics/Revision2013/Revision%202013%20-%20Real-time%20Volumetric%20Rendering%20Course%20Notes.pdf
+float Attenuation(float ShadowDensity, float cos_angle, float Beer ,float CouldAttuentionClampVal)
+{
+    float prim = exp(-Beer * ShadowDensity);
+    // 衰减钳制
+    // float CouldAttuentionClampVal = 0.8;
+    float scnd = exp(-Beer * CouldAttuentionClampVal) * 0.7;
+
+    float checkVal = remap(cos_angle, 0, 1, 0, scnd * 0.5);
+
+    return max(checkVal, prim);
+
+}
+
+float GetDensity(
+    float3 raypos, 
+    float3 actorpos, 
+    Texture2D HeightTex, 
+    SamplerState HeightTexSampler,
+    Texture2D NoiseTex, 
+    SamplerState NoiseTexSampler,
+    Texture2D DetailNoiseTex, 
+    SamplerState DetailNoiseTexSampler,
+    Texture2D CoverageTex, 
+    SamplerState CoverageTexSampler,
+    float CoverageBias,
+    float cloudsHeightMin,
+    float thickness,
+    float heightPower,
+    float3 BaseScale,
+    float3 DetailNoiseScale,
+    float3 Translation1,
+    float3 Translation2,
+    float DetailStrength,
+    float BaseCloudPower,
+    float DetailPower,
+    float time
+)
+{
+    float density = 0;
+    float speed = time * 0.1;
+
+    Translation1 += speed * Translation1;
+    Translation2 += speed * Translation2;
+    
+    raypos = ScaleWorldSpaceToTextureSpace(raypos, actorpos);
+
+    // float cloudsHeightMin = 0.7;
+    // float thickness = 0.1;
+    float cloudsHeightMax = cloudsHeightMin + thickness;
+    float HeightScale = 0;
+    if (raypos.z> cloudsHeightMin & raypos.z < cloudsHeightMax)
+    {
+        HeightScale = 1;
+    }
+
+    float vThickness = 1 - saturate(remap(raypos.z, cloudsHeightMin, cloudsHeightMax, 0, 1));
+    float2 uvHeight = float2(0.5, vThickness);
+    float height = HeightTex.SampleLevel(HeightTexSampler, uvHeight, 0).r;
+    // float heightPower = 0.5;
+    HeightScale = pow(HeightScale * height, heightPower);
+
+    //////sample cloud
+    // float3 BaseScale = float3 (1,1,1);
+    // float3 Translation1 = float3 (0,0,0);
+    float3 inPos1 = raypos * BaseScale + Translation1;
+    float4 sampleZx = DetailNoiseTex.SampleLevel(DetailNoiseTexSampler, float2((raypos.x /64) * DetailNoiseScale.z, raypos.z * DetailNoiseScale.z), 0);
+    float4 sampleZy = DetailNoiseTex.SampleLevel(DetailNoiseTexSampler, float2((raypos.y /64) * DetailNoiseScale.z, raypos.z * DetailNoiseScale.z), 0);
+    float z = 0 / 64;
+    float z2 = remap((sampleZx.g + sampleZy.g), 0, 1, 0.2, 0.8) / 64 / 5;
+    float2 uv = float2(z + inPos1.x / 64, inPos1.y);
+    float2 uv2 = float2(z2 + inPos1.x / 64, inPos1.y);
+
+    float4 sampleA = NoiseTex.SampleLevel(NoiseTexSampler, uv, 0);
+    float4 sampleB = NoiseTex.SampleLevel(NoiseTexSampler, uv2, 0);
+    float4 LowFrecNoise = lerp( sampleB, sampleA, remap(vThickness, 0, 1, 0, 0.9));
+
+    // float lowfreqFBM = lerp( LowFrecNoise.g, LowFrecNoise.b, vThickness);
+    float lowfreqFBM = LowFrecNoise.r * 0.625 + LowFrecNoise.g * 0.25 + LowFrecNoise.b * 0.125;
+    float lowfreqFBMSec = lerp( LowFrecNoise.r, 1 - LowFrecNoise.r, vThickness);
+    float BaseCloud = (LowFrecNoise.r - lowfreqFBMSec)/ (1 - lowfreqFBMSec);
+    BaseCloud = pow(BaseCloud, BaseCloudPower);
+    //////end sample cloud
+
+    //Coverage
+    float4 cloudCoverageTex = CoverageTex.SampleLevel(CoverageTexSampler, float2(raypos.x * BaseScale.z, raypos.y * BaseScale.z), 0);
+	float cloudCoverage = cloudCoverageTex.r * 0.625 + cloudCoverageTex.g * 0.25 + cloudCoverageTex.b * 0.125;
+    cloudCoverage = cloudCoverageTex.g;
+	float baseCloudWithCoverage = (BaseCloud - cloudCoverage)/(1 - cloudCoverage) * cloudCoverage;
+	baseCloudWithCoverage += CoverageBias * cloudCoverage;
+    // float baseCloudWithCoverage = pow(cloudCoverage, CoverageBias) * BaseCloud;
+	BaseCloud = saturate(baseCloudWithCoverage);
+
+    BaseCloud = BaseCloud * HeightScale;
+
+    //////add detail
+    //sample cloud
+    // float3 DetailNoiseScale = float3 (1,1,1);
+    // float3 Translation2 = float3 (0,0,0);
+    inPos1 = raypos * DetailNoiseScale + Translation2;
+    z = floor(frac(inPos1.z) * 64) / 64;
+    z2 = (sampleZx.g + sampleZy.g) / 64;
+    uv = float2(z + frac(inPos1.x) / 64, frac(inPos1.y));
+    uv2 = float2(z2 + frac(inPos1.x) / 64, frac(inPos1.y));
+
+    sampleA = DetailNoiseTex.SampleLevel(DetailNoiseTexSampler, uv, 0);
+    sampleB = DetailNoiseTex.SampleLevel(DetailNoiseTexSampler, uv2, 0);
+    float4 HighFreqFBM = lerp( sampleB, sampleA, vThickness);
+
+    float4 HighFrecNoise = HighFreqFBM.r * 0.625 + HighFreqFBM.g * 0.25 + HighFreqFBM.b * 0.125;
+    HighFrecNoise = pow(HighFrecNoise, DetailPower);
+    // HighFreqFBM = smoothstep(0.5, 0.55, HighFreqFBM);
+
+	float detailValue = (BaseCloud - HighFrecNoise)/(1 - HighFrecNoise);
+
+    // float DetailStrength = 1;
+    BaseCloud += BaseCloud * HighFrecNoise * DetailStrength;
+    BaseCloud = saturate(BaseCloud);
+    // BaseCloud = lerp( sampleA, sampleB, frac(raypos.z * 10)).r;
+    //end sample cloud
+    //////end of detail noise
+
+    density = BaseCloud;
+
+    return density;
+}
+
+
+float4 rayMarchingClouds(
+    FMaterialPixelParameters Parameters, 
+    float func, 
+    Texture2D HeightTex, 
+    SamplerState HeightTexSampler, 
+    Texture2D NoiseTex, 
+    SamplerState NoiseTexSampler, 
+    Texture2D DetailNoiseTex, 
+    SamplerState DetailNoiseTexSampler,
+    float jitter,
+    float MaxDistance,
+    float Marching_Steps,
+    float Sun_Marching_Steps,
+    float3 SunDir,
+    float Beer,
+    float CouldAttuentionClampVal,
+    float cloud_inscatter,
+    float cloud_outscatter,
+    float cloud_silver_intensity,
+    float cloud_silver_exponent,
+    float cloudsHeightMin,
+    float thickness,
+    float heightPower,
+    float3 BaseScale,
+    float3 DetailNoiseScale,
+    float3 Translation1,
+    float3 Translation2,
+    float DetailStrength,
+    float time,
+    float3 LightColor,
+    float3 CloudBrightColor,
+    float3 CloudShadowColor,
+    float LightScalar,
+    float AmbientScalar,
+    float densityScale,
+    Texture2D CoverageTex, 
+    SamplerState CoverageTexSampler,
+    float CoverageBias,
+    float BaseCloudPower,
+    float DetailPower,
+    float LightVsShadow
+)
+{
+    float4 finalColor = float4(0, 0, 0, 0);
+    // float MaxDistance = 100000.0f;
+    // int Marching_Steps = 256;
+    // int Sun_Marching_Steps = 8;
+    // float3 SunDir = normalize(float3(0.2, 0.2, 1));
+    SunDir = normalize(SunDir);
+
+    float3 campos = ResolvedView.WorldCameraOrigin;
+    float3 wpos = GetWorldPosition(Parameters);
+    float3 actorpos = GetActorWorldPosition();
+    // 于物体的交互只需要采一下深度就可以了
+    float SceneDepth = CalcSceneDepth(ScreenAlignedPosition(GetScreenPosition(Parameters)));
+    float MarchingDepth = 0;
+
+    // Ray direction
+    float3 raydir = normalize(wpos - campos);
+    float3 raypos = campos;
+    float density = 0;
+    float ShadowDensity = 0;
+
+    //jitter
+    // float jitter = 1
+    // float3 localcamvec = normalize( mul(Parameters.CameraVector, Primitive.WorldToLocal) );
+    // int3 randpos = int3(Parameters.SvPosition.xy, View.StateFrameIndexMod8);
+    // float rand = float(Rand3DPCG16(randpos).x) / 0xffff;
+    // campos += localcamvec * rand.x * jitter ;
+     
+    // 从云层表面开始 marching
+    float cloudsHeighMintWSz = (cloudsHeightMin - 0.5) * Primitive.ObjectBounds.xyz * 2 + actorpos.z - 100;
+    float cloudsHeighMaxtWSz = (cloudsHeightMin + thickness - 0.5) * Primitive.ObjectBounds.xyz * 2 + actorpos.z + 100;
+    float thicknessWS = abs(cloudsHeighMaxtWSz - cloudsHeighMintWSz);
+    float startMarchingDepthz = 0;
+    float RayLengthXY = 1;
+    if (campos.z < cloudsHeighMintWSz || campos.z > cloudsHeighMaxtWSz)
+    {
+        MarchingDepth = abs(min(abs(cloudsHeighMintWSz - raypos.z), abs(cloudsHeighMaxtWSz - raypos.z)) / raydir.z);
+        startMarchingDepthz = MarchingDepth;
+        raypos += MarchingDepth * raydir;
+
+        RayLengthXY = distance(float3 (campos.x , campos.y, 0), float3 (raypos.x , raypos.y, 0));
+        RayLengthXY = remap(RayLengthXY, 0, MaxDistance*100, 1 , 100);
+
+        RayLengthXY = exp(0.2 * RayLengthXY);
+    }
+
+
+    float Marching_Size = thicknessWS / Marching_Steps * RayLengthXY;
+
+    for (int step = 0; step < Marching_Steps; step++)
+    {
+        if (MarchingDepth >= SceneDepth)
+            break;
+
+        density += GetDensity(raypos, actorpos, HeightTex, 
+                              HeightTexSampler, 
+                              NoiseTex, 
+                              NoiseTexSampler,
+                              DetailNoiseTex,
+                              DetailNoiseTexSampler,
+                              CoverageTex, 
+                              CoverageTexSampler,
+                              CoverageBias,
+                              cloudsHeightMin,
+                              thickness,
+                              heightPower,
+                              BaseScale,
+                              DetailNoiseScale,
+                              Translation1,
+                              Translation2,
+                              DetailStrength,
+                              BaseCloudPower,
+                              DetailPower,
+                              time
+                              ) * densityScale;
+
+        //////Lighting
+        if (density > 0.001f)
+        {
+            float3 SunRayPos = raypos;
+            for (int SunStep = 0; SunStep < Sun_Marching_Steps; SunStep++)
+            {
+                ShadowDensity += GetDensity(SunRayPos, actorpos, HeightTex, 
+                              HeightTexSampler, 
+                              NoiseTex, 
+                              NoiseTexSampler,
+                              DetailNoiseTex,
+                              DetailNoiseTexSampler,
+                              CoverageTex, 
+                              CoverageTexSampler,
+                              CoverageBias,
+                              cloudsHeightMin,
+                              thickness,
+                              heightPower,
+                              BaseScale,
+                              DetailNoiseScale,
+                              Translation1,
+                              Translation2,
+                              DetailStrength,
+                              BaseCloudPower,
+                              DetailPower,
+                              time
+                              ) * densityScale;
+
+                SunRayPos += RayLengthXY * SunDir * (thicknessWS / SunDir.z / Sun_Marching_Steps) * step * exp(0.02 * step);
+                //  * remap(map3(SunRayPos), 0, 1, saturate(1-jitter), 1)
+
+                // if(ShadowDensity > 1)
+                //     break;
+            }
+        }
+        //////end lighting
+
+        if(density > 64)
+            break;
+        
+        float CurStepSize = RayLengthXY * Marching_Size * step * exp(0.02 * step) * remap(map3(raypos), 0, 1, saturate(1-jitter), 1);
+        raypos += raydir * CurStepSize;
+
+        if (distance(raypos, campos) >= (MaxDistance * 100))
+            break;
+
+        MarchingDepth += CurStepSize;
+        if (MarchingDepth >= SceneDepth)
+            break;
+        
+        if (abs((MarchingDepth - startMarchingDepthz) * raydir.z) >= thicknessWS)
+            break;
+    }
+
+    density = saturate(density);
+    finalColor.rgb = float3(density, density, density);
+
+    float cos_angle = dot(raydir, SunDir);
+
+    // ShadowDensity = ShadowDensity;
+
+    // 透射
+    // float Beer = 0.6f; 
+    // 衰减钳制
+    // float CouldAttuentionClampVal = 0.8;
+    float AttenPrim = Attenuation(ShadowDensity, cos_angle, Beer, CouldAttuentionClampVal);
+    float powder = (1.0 - pow(AttenPrim, 2));
+
+    // 散射
+    // float cloud_inscatter = 0.4f;
+    // float cloud_outscatter = 0.3f;
+    float cloud_in_vs_outscatter = 0.5f;
+    // float cloud_silver_intensity = 10.0f;
+    // float cloud_silver_exponent = 0.5f;
+
+    float first_hg = HG(cos_angle, cloud_inscatter);
+    float second_hg = cloud_silver_intensity * HG(cos_angle, cloud_inscatter) * exp(-0.8 * ShadowDensity);
+    float in_scatter_hg = max(first_hg, second_hg);
+    float out_scatter_hg = HG(cos_angle, -cloud_outscatter);
+    float InOutScater = lerp(in_scatter_hg, out_scatter_hg, cloud_in_vs_outscatter);
+
+    // float3 LightColor = float3 (1, 1, 1);
+    // float3 CloudBrightColor = float3 (1, 1, 1);
+    // float3 CloudShadowColor = float3 (1, 1, 1);
+    // float LightScalar = 1;
+    // float AmbientScalar = 1;
+    float3 shadowterm  = AttenPrim * InOutScater * powder;
+    float shadowdist = pow(ShadowDensity / (Sun_Marching_Steps + 1), LightVsShadow); 
+    float3 ambientColor = lerp(CloudBrightColor, CloudShadowColor, shadowdist);
+    shadowterm *= LightScalar * LightColor;
+    ambientColor *= AmbientScalar;
+
+    //sum
+    float3 absorbedlight = (shadowterm + ambientColor);
+
+    // if (RayLengthXY != 1)
+    // {
+    //     RayLengthXY = saturate(remap((1 - RayLengthXY/50), 0, 1, 0, 1.2));
+    // }
+    finalColor.a = density;
+
+    // finalColor.a = saturate(1.0 - density);
+    finalColor.rgb = absorbedlight;
+    finalColor.rgb *= finalColor.a;
+    // finalColor.rgb = RayLengthXY; 
+
+    return finalColor;
+}
+/* 
+rayMarchingClouds(
+    Parameters, 
+    func, 
+    HeightTex, 
+    HeightTexSampler, 
+    NoiseTex, 
+    NoiseTexSampler, 
+    DetailNoiseTex, 
+    DetailNoiseTexSampler,
+    jitter,
+    MaxDistance,
+    Marching_Steps,
+    Sun_Marching_Steps,
+    SunDir,
+    Beer,
+    CouldAttuentionClampVal,
+    cloud_inscatter,
+    cloud_outscatter,
+    cloud_silver_intensity,
+    cloud_silver_exponent,
+    cloudsHeightMin,
+    thickness,
+    heightPower,
+    BaseScale,
+    DetailNoiseScale,
+    Translation1,
+    Translation2,
+    DetailStrength,
+    time,
+    LightColor,
+    CloudBrightColor,
+    CloudShadowColor,
+    LightScalar,
+    AmbientScalar,
+    densityScale,
+    CoverageTex, 
+    CoverageTexSampler,
+    CoverageBias,
+    BaseCloudPower,
+    DetailPower,
+    LightVsShadow
+); 
+*/
+
+float Fun_Null()
+{
+    return 1;
